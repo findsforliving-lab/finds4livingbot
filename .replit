@@ -1,0 +1,6 @@
+run = "python3 bot_with_edit.py"
+language = "python3"
+entrypoint = "bot_with_edit.py"
+
+[deploy]
+run = ["sh", "-c", "python3 bot_with_edit.py"]
