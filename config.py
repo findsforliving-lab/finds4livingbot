@@ -12,12 +12,12 @@ class Config:
     """Classe de configuração centralizada"""
     
     # Telegram
-    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-    TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
+    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+    TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID', '').strip()
     
     # Shopify
-    SHOPIFY_SHOP_URL = os.getenv('SHOPIFY_SHOP_URL')
-    SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
+    SHOPIFY_SHOP_URL = os.getenv('SHOPIFY_SHOP_URL', '').strip()
+    SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN', '').strip()
     
     # OpenAI (opcional)
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
