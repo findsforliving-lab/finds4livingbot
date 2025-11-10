@@ -32,21 +32,48 @@ class ProductExtractor:
             import requests
             from bs4 import BeautifulSoup
             
+            # Expandir links curtos (amzn.to, etc)
+            final_url = await self._expand_short_url(url)
+            
             headers = Config.get_headers()
-            response = requests.get(url, headers=headers, timeout=Config.REQUEST_TIMEOUT)
+            response = requests.get(final_url, headers=headers, timeout=Config.REQUEST_TIMEOUT, allow_redirects=True)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Usar extrator específico do site
-            product_info = self.site_extractor.extract(url, soup)
-            product_info['original_url'] = url
+            product_info = self.site_extractor.extract(final_url, soup)
+            product_info['original_url'] = url  # Manter URL original (pode ser link curto)
             
             return product_info
             
         except Exception as e:
             logger.error(f"Erro ao extrair produto: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {'error': str(e)}
+    
+    async def _expand_short_url(self, url: str) -> str:
+        """Expande URLs curtas (amzn.to, etc)"""
+        try:
+            # Se não é link curto, retornar como está
+            if 'amzn.to' not in url.lower():
+                return url
+            
+            import requests
+            # Fazer requisição HEAD para pegar a URL final sem baixar o conteúdo
+            response = requests.head(url, allow_redirects=True, timeout=10)
+            final_url = response.url
+            
+            # Se conseguiu expandir, retornar URL final
+            if final_url and final_url != url:
+                logger.info(f"URL expandida: {url} -> {final_url}")
+                return final_url
+            
+            return url
+        except Exception as e:
+            logger.warning(f"Erro ao expandir URL curta: {e}, usando URL original")
+            return url
 
 class ShopifyManager:
     def __init__(self):
@@ -302,12 +329,39 @@ Envie um link para começar! 🚀
             # Armazenar produto pendente
             self.pending_products[user_id] = product_info
             
-            # Mostrar preview com opções de edição
-            await self._show_product_preview_with_edit(update, product_info, processing_msg)
+            # Mostrar menu inicial com opções
+            await self._show_initial_menu(update, product_info, processing_msg)
             
         except Exception as e:
             logger.error(f"Erro ao processar URL: {e}")
             await processing_msg.edit_text("❌ Erro ao processar o link. Tente novamente.")
+    
+    async def _show_initial_menu(self, update: Update, product_info: Dict, msg_to_edit):
+        """Mostra menu inicial com opções: Shopify ou Canal"""
+        title = product_info.get('title', 'Sem título')
+        price_info = product_info.get('price', {})
+        current_price = price_info.get('current', 0)
+        original_price = price_info.get('original', current_price)
+        images_count = len(product_info.get('images', []))
+        
+        menu_text = f"""
+📦 PRODUTO EXTRAÍDO
+
+📝 Título: {title}
+💰 Preço: ${current_price:.2f}
+📸 Imagens: {images_count} encontradas
+
+🎯 Onde deseja publicar este produto?
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("🛍️ Enviar para Shopify", callback_data="publish_to_shopify")],
+            [InlineKeyboardButton("📢 Enviar para Canal Telegram", callback_data="publish_to_channel_only")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await msg_to_edit.edit_text(menu_text, reply_markup=reply_markup)
     
     async def _show_product_preview_with_edit(self, update: Update, product_info: Dict, msg_to_edit):
         """Mostra preview do produto com opções de edição"""
@@ -385,7 +439,18 @@ O que deseja fazer?        """
         user_id = update.effective_user.id
         
         try:
-            if query.data == "edit_title":
+            if query.data == "publish_to_shopify":
+                # Fluxo completo: mostrar preview com todas as opções de edição
+                if user_id in self.pending_products:
+                    product_info = self.pending_products[user_id]
+                    # Criar um objeto fake para update (a função não usa, mas precisa da assinatura)
+                    from types import SimpleNamespace
+                    fake_update = SimpleNamespace()
+                    await self._show_product_preview_with_edit(fake_update, product_info, query.message)
+            elif query.data == "publish_to_channel_only":
+                # Fluxo simplificado: só canal do Telegram
+                await self._handle_channel_only_flow(query, user_id)
+            elif query.data == "edit_title":
                 await self._start_edit_title(query, user_id)
             elif query.data == "manage_categories":
                 await self._show_category_management(query, user_id)
@@ -420,6 +485,14 @@ O que deseja fazer?        """
                 await self._edit_channel_preview(query, user_id)
             elif query.data == "cancel_channel_post":
                 await self._cancel_channel_post(query, user_id)
+            elif query.data == "channel_edit_title":
+                await self._start_channel_edit_title(query, user_id)
+            elif query.data == "channel_edit_image":
+                await self._start_channel_edit_image(query, user_id)
+            elif query.data == "channel_edit_price":
+                await self._start_channel_edit_price(query, user_id)
+            elif query.data == "channel_post_direct":
+                await self._post_channel_direct(query, user_id, context)
             elif query.data == "cancel":
                 await query.edit_message_text("❌ Operação cancelada.")
                 if user_id in self.pending_products:
@@ -544,6 +617,70 @@ O que deseja fazer?        """
                 return
         elif field == 'description':
             self.pending_products[user_id]['description'] = new_value
+        elif field == 'channel_title':
+            # Editar título no fluxo simplificado
+            self.pending_products[user_id]['title'] = new_value
+            # Voltar ao preview simplificado
+            del self.editing_products[user_id]
+            success_msg = await update.message.reply_text("✅ Título atualizado!")
+            # Simular query para voltar ao preview
+            from types import SimpleNamespace
+            fake_query = SimpleNamespace()
+            fake_query.edit_message_text = success_msg.edit_text
+            fake_query.message = success_msg
+            fake_query.from_user = update.effective_user
+            await self._show_channel_only_preview(fake_query, user_id, self.pending_products[user_id])
+            return
+        elif field == 'channel_image':
+            # Editar primeira imagem no fluxo simplificado
+            images = self.pending_products[user_id].get('images', [])
+            if images:
+                images[0] = new_value.strip()
+            else:
+                images = [new_value.strip()]
+            self.pending_products[user_id]['images'] = images
+            # Voltar ao preview simplificado
+            del self.editing_products[user_id]
+            success_msg = await update.message.reply_text("✅ Primeira imagem atualizada!")
+            # Simular query para voltar ao preview
+            from types import SimpleNamespace
+            fake_query = SimpleNamespace()
+            fake_query.edit_message_text = success_msg.edit_text
+            fake_query.message = success_msg
+            fake_query.from_user = update.effective_user
+            await self._show_channel_only_preview(fake_query, user_id, self.pending_products[user_id])
+            return
+        elif field == 'channel_price':
+            # Editar preço no fluxo simplificado
+            try:
+                prices = new_value.split(',')
+                if len(prices) == 2:
+                    current = float(prices[0].strip())
+                    original = float(prices[1].strip())
+                    discount = round(((original - current) / original) * 100) if original > current else 0
+                    
+                    self.pending_products[user_id]['price'] = {
+                        'current': current,
+                        'original': original,
+                        'discount_percent': discount
+                    }
+                else:
+                    await update.message.reply_text("❌ Formato inválido. Use: preço_atual,preço_original")
+                    return
+            except ValueError:
+                await update.message.reply_text("❌ Preços inválidos. Use números válidos.")
+                return
+            # Voltar ao preview simplificado
+            del self.editing_products[user_id]
+            success_msg = await update.message.reply_text("✅ Preço atualizado!")
+            # Simular query para voltar ao preview
+            from types import SimpleNamespace
+            fake_query = SimpleNamespace()
+            fake_query.edit_message_text = success_msg.edit_text
+            fake_query.message = success_msg
+            fake_query.from_user = update.effective_user
+            await self._show_channel_only_preview(fake_query, user_id, self.pending_products[user_id])
+            return
         elif field == 'channel_text':
             # Salvar texto customizado do canal
             self.pending_products[user_id]['custom_channel_text'] = new_value
@@ -681,6 +818,136 @@ O que deseja fazer?        """
             # Mostrar preview normal do produto (antes do Shopify)
             success_msg = await update.message.reply_text("✅ Atualizado! Aqui está o preview:")
             await self._show_product_preview_with_edit(update, self.pending_products[user_id], success_msg)
+    
+    async def _handle_channel_only_flow(self, query, user_id: int):
+        """Fluxo simplificado: apenas canal do Telegram (só título, primeira imagem, preço)"""
+        if user_id not in self.pending_products:
+            await query.edit_message_text("❌ Produto não encontrado.")
+            return
+        
+        product_info = self.pending_products[user_id]
+        
+        # Marcar como fluxo simplificado
+        product_info['channel_only'] = True
+        
+        # Mostrar preview simplificado
+        await self._show_channel_only_preview(query, user_id, product_info)
+    
+    async def _show_channel_only_preview(self, query, user_id: int, product_info: Dict):
+        """Mostra preview simplificado para canal apenas"""
+        title = product_info.get('title', 'Sem título')
+        price_info = product_info.get('price', {})
+        current_price = price_info.get('current', 0)
+        original_price = price_info.get('original', current_price)
+        discount = price_info.get('discount_percent', 0)
+        images = product_info.get('images', [])
+        first_image = images[0] if images else 'Nenhuma imagem'
+        
+        preview_text = f"""
+📢 PREVIEW PARA CANAL DO TELEGRAM
+
+📝 Título: {title}
+
+💰 Preço Atual: ${current_price:.2f}
+{f"💰 Preço Original: ${original_price:.2f}" if original_price > current_price else ""}
+{f"💥 Desconto: {discount}% OFF" if discount > 0 else ""}
+
+🖼️ Primeira Imagem: {first_image[:50]}{"..." if len(first_image) > 50 else ""}
+
+✏️ Você pode editar antes de postar:
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Editar Título", callback_data="channel_edit_title")],
+            [InlineKeyboardButton("🖼️ Editar Primeira Imagem", callback_data="channel_edit_image")],
+            [InlineKeyboardButton("💰 Editar Preço", callback_data="channel_edit_price")],
+            [InlineKeyboardButton("✅ Postar no Canal", callback_data="channel_post_direct")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(preview_text, reply_markup=reply_markup)
+    
+    async def _start_channel_edit_title(self, query, user_id: int):
+        """Inicia edição do título no fluxo simplificado"""
+        if user_id not in self.pending_products:
+            await query.edit_message_text("❌ Produto não encontrado.")
+            return
+        
+        current_title = self.pending_products[user_id].get('title', 'Sem título')
+        
+        await query.edit_message_text(
+            f"✏️ Editar Título\n\n"
+            f"Título atual: {current_title}\n\n"
+            f"Digite o novo título:"
+        )
+        
+        self.editing_products[user_id] = {'field': 'channel_title', 'message_id': query.message.message_id}
+    
+    async def _start_channel_edit_image(self, query, user_id: int):
+        """Inicia edição da primeira imagem no fluxo simplificado"""
+        if user_id not in self.pending_products:
+            await query.edit_message_text("❌ Produto não encontrado.")
+            return
+        
+        images = self.pending_products[user_id].get('images', [])
+        current_image = images[0] if images else 'Nenhuma imagem'
+        
+        await query.edit_message_text(
+            f"🖼️ Editar Primeira Imagem\n\n"
+            f"Imagem atual: {current_image[:50]}{'...' if len(current_image) > 50 else ''}\n\n"
+            f"📷 Envie o link da nova primeira imagem:"
+        )
+        
+        self.editing_products[user_id] = {'field': 'channel_image', 'message_id': query.message.message_id}
+    
+    async def _start_channel_edit_price(self, query, user_id: int):
+        """Inicia edição do preço no fluxo simplificado"""
+        if user_id not in self.pending_products:
+            await query.edit_message_text("❌ Produto não encontrado.")
+            return
+        
+        price_info = self.pending_products[user_id].get('price', {})
+        current_price = price_info.get('current', 0)
+        original_price = price_info.get('original', current_price)
+        
+        await query.edit_message_text(
+            f"💰 Editar Preços\n\n"
+            f"Preço atual: ${current_price:.2f}\n"
+            f"Preço original: ${original_price:.2f}\n\n"
+            f"Digite os novos preços no formato:\n"
+            f"`preço_atual,preço_original`\n\n"
+            f"Exemplo: `39.90,69.90`"
+        )
+        
+        self.editing_products[user_id] = {'field': 'channel_price', 'message_id': query.message.message_id}
+    
+    async def _post_channel_direct(self, query, user_id: int, context):
+        """Posta diretamente no canal do Telegram (sem Shopify)"""
+        if user_id not in self.pending_products:
+            await query.edit_message_text("❌ Produto não encontrado.")
+            return
+        
+        product_info = self.pending_products[user_id]
+        affiliate_link = product_info.get('original_url', '')
+        
+        # Criar um shopify_result fake para usar a função existente
+        fake_shopify_result = {'url': 'N/A', 'title': product_info.get('title', 'Produto')}
+        
+        await query.edit_message_text("🚀 Postando no canal...")
+        
+        # Postar no canal
+        await self._post_to_telegram_channel(product_info, fake_shopify_result, affiliate_link, context)
+        
+        # Mensagem de sucesso
+        success_msg = f"""🎉 PRODUTO POSTADO NO CANAL!
+
+📢 Canal: @hotdealsdailyf4l"""
+        
+        await query.edit_message_text(success_msg)
+        
+        # Limpar produto pendente
+        del self.pending_products[user_id]
     
     async def _publish_product(self, query, user_id: int, context):
         """Publica o produto no Shopify e canal"""
@@ -860,6 +1127,43 @@ ${original_price:.2f} → ${current_price:.2f}"""
             return "🛒 Buy on AliExpress"
         else:
             return "🛒 Get This Promo"
+    
+    def _format_channel_text_for_copy(self, product_info: Dict, affiliate_link: str) -> str:
+        """Gera o texto formatado para copiar (WhatsApp)"""
+        title = product_info.get('title', 'Produto')
+        price_info = product_info.get('price', {})
+        current_price = price_info.get('current', 0)
+        original_price = price_info.get('original', current_price)
+        discount = price_info.get('discount_percent', 0)
+        
+        # Limpar título (remover espaços extras)
+        title = ' '.join(title.split()) if title else 'Produto'
+        
+        # Usar texto customizado se existir, senão usar padrão
+        if 'custom_channel_text' in product_info and product_info['custom_channel_text']:
+            # Se tiver texto customizado, verificar se já tem o link
+            custom_text = product_info['custom_channel_text']
+            # Se o texto customizado já contém o link, usar como está
+            if affiliate_link in custom_text:
+                return custom_text
+            # Senão, adicionar o link no final (1 linha em branco)
+            return f"{custom_text}\n\nLink: {affiliate_link}"
+        else:
+            # Formato padrão com espaçamentos corretos (1 linha em branco entre seções)
+            if original_price > current_price:
+                return f"""🔥 *{title}*
+
+💥 {discount}% OFF
+
+~${original_price:.2f}~ → ${current_price:.2f}
+
+Link: {affiliate_link}"""
+            else:
+                return f"""🔥 *{title}*
+
+💰 ${current_price:.2f}
+
+Link: {affiliate_link}"""
 
     async def _post_to_telegram_channel(self, product_info: Dict, shopify_result: Dict, affiliate_link: str, context):
         """Posta produto no canal do Telegram"""
@@ -883,11 +1187,12 @@ ${original_price:.2f} → ${current_price:.2f}"""
             else:
                 # Mensagem formatada padrão (sem o link, vai no botão)
                 if original_price > current_price:
-                    # Usar seta em vez de texto riscado
+                    # Usar strikethrough para preço original
                     message = f"""🔥 *{title}*
 
 💥 {discount}% OFF
-${original_price:.2f} → ${current_price:.2f}"""
+
+~${original_price:.2f}~ → ${current_price:.2f}"""
                 else:
                     message = f"""🔥 *{title}*
 
@@ -954,10 +1259,7 @@ ${original_price:.2f} → ${current_price:.2f}"""
             
             success_msg = f"""🎉 PRODUTO PUBLICADO COM SUCESSO!
 🛍️ Shopify: {shopify_result['url']}
-📢 Canal: Postado em @hotdealsdailyf4l
-
-📦 Produto: {shopify_result['title']}
-🏷️ Categorias: {categories_text}"""
+📢 Canal: Postado em @hotdealsdailyf4l"""
             
             await query.edit_message_text(success_msg)
             
@@ -1037,7 +1339,9 @@ ${original_price:.2f} → ${current_price:.2f}"""
                 del product_info['affiliate_link']
             
             # Voltar para o preview de edição normal
-            await self._show_product_preview_with_edit(query, user_id)
+            from types import SimpleNamespace
+            fake_update = SimpleNamespace()
+            await self._show_product_preview_with_edit(fake_update, product_info, query.message)
             
         except Exception as e:
             logger.error(f"Erro ao editar preview: {e}")

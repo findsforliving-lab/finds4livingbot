@@ -42,26 +42,72 @@ class SiteSpecificExtractor:
         """Extrator específico para Amazon"""
         data = {}
         
-        # Título
+        # Título - mais seletores para melhor captura
         title_selectors = [
             '#productTitle',
+            'h1#title span',
+            'h1.a-size-large',
+            'h1.a-size-base',
             '.product-title',
-            'h1.a-size-large'
+            'h1',
+            'span#productTitle'
         ]
         data['title'] = self._get_text_by_selectors(soup, title_selectors)
         
-        # Preços
+        # Se não encontrou título, tentar JSON-LD
+        if not data['title']:
+            scripts = soup.find_all('script', type='application/ld+json')
+            for script in scripts:
+                try:
+                    json_data = json.loads(script.string)
+                    if isinstance(json_data, dict) and 'name' in json_data:
+                        data['title'] = json_data['name']
+                        break
+                    elif isinstance(json_data, list):
+                        for item in json_data:
+                            if isinstance(item, dict) and 'name' in item:
+                                data['title'] = item['name']
+                                break
+                except:
+                    continue
+        
+        # Preços - mais seletores e métodos
         price_current = self._get_text_by_selectors(soup, [
-            '.a-price-current .a-offscreen',
             '.a-price .a-offscreen',
+            '.a-price-current .a-offscreen',
             '#priceblock_dealprice',
-            '#priceblock_ourprice'
+            '#priceblock_ourprice',
+            '#priceblock_saleprice',
+            '.a-price-whole',
+            'span.a-price[data-a-color="price"] .a-offscreen',
+            'span[data-a-color="price"] .a-offscreen'
         ])
+        
+        # Se não encontrou preço atual, tentar JSON-LD
+        if not price_current:
+            scripts = soup.find_all('script', type='application/ld+json')
+            for script in scripts:
+                try:
+                    json_data = json.loads(script.string)
+                    if isinstance(json_data, dict):
+                        if 'offers' in json_data:
+                            offers = json_data['offers']
+                            if isinstance(offers, dict) and 'price' in offers:
+                                price_current = str(offers['price'])
+                                break
+                            elif isinstance(offers, list) and len(offers) > 0:
+                                if 'price' in offers[0]:
+                                    price_current = str(offers[0]['price'])
+                                    break
+                except:
+                    continue
         
         price_original = self._get_text_by_selectors(soup, [
             '.a-price-was .a-offscreen',
             '#priceblock_listprice',
-            '.a-text-strike .a-offscreen'
+            '.a-text-strike .a-offscreen',
+            '.basisPrice .a-offscreen',
+            'span.a-price.a-text-price .a-offscreen'
         ])
         
         data['price'] = self._parse_prices(price_current, price_original)
@@ -73,7 +119,8 @@ class SiteSpecificExtractor:
         desc_selectors = [
             '#feature-bullets ul',
             '#productDescription',
-            '.a-unordered-list.a-vertical'
+            '.a-unordered-list.a-vertical',
+            '#productDescription_feature_div'
         ]
         data['description'] = self._get_text_by_selectors(soup, desc_selectors)
         
@@ -405,8 +452,13 @@ class SiteSpecificExtractor:
         """Obtém texto usando lista de seletores"""
         for selector in selectors:
             element = soup.select_one(selector)
-            if element and element.get_text().strip():
-                return element.get_text().strip()
+            if element:
+                text = element.get_text()
+                if text:
+                    # Limpar texto: remover espaços extras e quebras de linha
+                    text = ' '.join(text.split())
+                    if text.strip():
+                        return text.strip()
         return ""
     
     def _parse_prices(self, current_str: str, original_str: str) -> Dict:
@@ -434,24 +486,39 @@ class SiteSpecificExtractor:
             return None
         
         # Remover caracteres não numéricos exceto vírgula e ponto
-        price_clean = re.sub(r'[^\d,.]', '', price_text)
+        price_clean = re.sub(r'[^\d,.]', '', price_text.strip())
         
         if not price_clean:
             return None
         
         try:
-            # Tratar formato brasileiro (123,45)
+            # Tratar formato brasileiro (123,45) ou americano (123.45)
             if ',' in price_clean and '.' in price_clean:
-                # Formato: 1.234,56
-                price_clean = price_clean.replace('.', '').replace(',', '.')
+                # Formato: 1.234,56 (brasileiro) ou 1,234.56 (americano)
+                # Verificar qual é o separador de milhares
+                if price_clean.rindex('.') > price_clean.rindex(','):
+                    # Último ponto está depois da vírgula = formato americano (1,234.56)
+                    price_clean = price_clean.replace(',', '')
+                else:
+                    # Última vírgula está depois do ponto = formato brasileiro (1.234,56)
+                    price_clean = price_clean.replace('.', '').replace(',', '.')
             elif ',' in price_clean:
                 # Verificar se é separador decimal ou de milhares
                 parts = price_clean.split(',')
-                if len(parts[-1]) == 2:  # Provavelmente decimal
+                if len(parts[-1]) == 2:  # Provavelmente decimal (123,45)
                     price_clean = price_clean.replace(',', '.')
+                elif len(parts[-1]) == 3:  # Provavelmente milhares (1,234)
+                    price_clean = price_clean.replace(',', '')
+            elif '.' in price_clean:
+                # Verificar se é decimal ou milhares
+                parts = price_clean.split('.')
+                if len(parts) > 2:  # Múltiplos pontos = milhares (1.234.567)
+                    price_clean = price_clean.replace('.', '')
+                elif len(parts) == 2 and len(parts[-1]) > 2:  # Mais de 2 dígitos após ponto = milhares
+                    price_clean = price_clean.replace('.', '')
             
             return float(price_clean)
-        except ValueError:
+        except (ValueError, IndexError):
             return None
     
     def _is_valid_image_url(self, url: str) -> bool:
