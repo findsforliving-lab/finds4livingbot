@@ -939,10 +939,17 @@ O que deseja fazer?        """
         # Postar no canal
         await self._post_to_telegram_channel(product_info, fake_shopify_result, affiliate_link, context)
         
-        # Mensagem de sucesso
+        # Gerar texto formatado para preview
+        formatted_text = self._format_channel_text_for_copy(product_info, affiliate_link)
+        
+        # Mensagem de sucesso com preview (sem parse_mode para manter asteriscos visíveis)
         success_msg = f"""🎉 PRODUTO POSTADO NO CANAL!
 
-📢 Canal: @hotdealsdailyf4l"""
+📢 Canal: @hotdealsdailyf4l
+
+━━━━━━━━━━━━━━━━━━━━
+
+{formatted_text}"""
         
         await query.edit_message_text(success_msg)
         
@@ -1253,13 +1260,20 @@ Link: {affiliate_link}"""
             # Postar no canal
             await self._post_to_telegram_channel(product_info, shopify_result, affiliate_link, context)
             
-            # Mensagem de sucesso
+            # Gerar texto formatado para preview
+            formatted_text = self._format_channel_text_for_copy(product_info, affiliate_link)
+            
+            # Mensagem de sucesso com preview (sem parse_mode para manter asteriscos visíveis)
             categories = product_info.get('categories', ['Electronics'])
             categories_text = " | ".join(categories)
             
             success_msg = f"""🎉 PRODUTO PUBLICADO COM SUCESSO!
 🛍️ Shopify: {shopify_result['url']}
-📢 Canal: Postado em @hotdealsdailyf4l"""
+📢 Canal: Postado em @hotdealsdailyf4l
+
+━━━━━━━━━━━━━━━━━━━━
+
+{formatted_text}"""
             
             await query.edit_message_text(success_msg)
             
