@@ -1136,12 +1136,24 @@ ${original_price:.2f} → ${current_price:.2f}"""
             return "🛒 Get This Promo"
     
     def _convert_to_telegram_markdown(self, text: str) -> str:
-        """Converte ~texto~ para ~~texto~~ (formato do Telegram)"""
+        """Converte ~texto~ para <s>texto</s> (formato HTML do Telegram)"""
         import re
-        # Converte ~texto~ para ~~texto~~ (mas não ~~texto~~ que já está correto)
+        # Converte ~texto~ para <s>texto</s> (HTML strikethrough)
         # Usa regex para encontrar ~texto~ que não seja ~~texto~~
         pattern = r'(?<!~)~([^~]+)~(?!~)'
-        return re.sub(pattern, r'~~\1~~', text)
+        return re.sub(pattern, r'<s>\1</s>', text)
+    
+    def _convert_to_telegram_html(self, text: str) -> str:
+        """Converte texto Markdown para HTML do Telegram"""
+        import re
+        # Primeiro, converter ~~texto~~ para <s>texto</s> (formato antigo)
+        text = re.sub(r'~~([^~]+)~~', r'<s>\1</s>', text)
+        # Depois, converter ~texto~ para <s>texto</s> (greedy match para pegar tudo entre tildes)
+        # Usa lookbehind e lookahead para garantir que não é ~~texto~~
+        text = re.sub(r'(?<!~)~([^~]+?)~(?!~)', r'<s>\1</s>', text)
+        # Converter *texto* para <b>texto</b> (bold) - fazer por último para não conflitar
+        text = re.sub(r'\*([^*]+?)\*', r'<b>\1</b>', text)
+        return text
     
     def _format_channel_text_for_copy(self, product_info: Dict, affiliate_link: str) -> str:
         """Gera o texto formatado para copiar (WhatsApp)"""
@@ -1198,19 +1210,19 @@ Link: {affiliate_link}"""
             
             # Usar texto customizado se existir, senão usar padrão
             if 'custom_channel_text' in product_info and product_info['custom_channel_text']:
-                # Converter ~texto~ para ~~texto~~ (formato do Telegram)
-                message = self._convert_to_telegram_markdown(product_info['custom_channel_text'])
+                # Converter para HTML (formato mais confiável do Telegram)
+                message = self._convert_to_telegram_html(product_info['custom_channel_text'])
             else:
                 # Mensagem formatada padrão (sem o link, vai no botão)
                 if original_price > current_price:
-                    # Usar strikethrough para preço original (Telegram usa ~~texto~~)
-                    message = f"""🔥 *{title}*
+                    # Usar strikethrough para preço original (HTML: <s>texto</s>)
+                    message = f"""🔥 <b>{title}</b>
 
 💥 {discount}% OFF
 
-~~${original_price:.2f}~~ → ${current_price:.2f}"""
+<s>${original_price:.2f}</s> → ${current_price:.2f}"""
                 else:
-                    message = f"""🔥 *{title}*
+                    message = f"""🔥 <b>{title}</b>
 
 💰 ${current_price:.2f}"""
             
@@ -1231,7 +1243,7 @@ Link: {affiliate_link}"""
                     photo=images[0],
                     caption=message,
                     reply_markup=reply_markup,
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
                 logger.info(f"Postagem no canal enviada com sucesso: {result.message_id}")
             else:
@@ -1240,7 +1252,7 @@ Link: {affiliate_link}"""
                     chat_id=Config.TELEGRAM_CHANNEL_ID,
                     text=message,
                     reply_markup=reply_markup,
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
                 logger.info(f"Postagem no canal enviada com sucesso: {result.message_id}")
                 
