@@ -1135,6 +1135,14 @@ ${original_price:.2f} → ${current_price:.2f}"""
         else:
             return "🛒 Get This Promo"
     
+    def _convert_to_telegram_markdown(self, text: str) -> str:
+        """Converte ~texto~ para ~~texto~~ (formato do Telegram)"""
+        import re
+        # Converte ~texto~ para ~~texto~~ (mas não ~~texto~~ que já está correto)
+        # Usa regex para encontrar ~texto~ que não seja ~~texto~~
+        pattern = r'(?<!~)~([^~]+)~(?!~)'
+        return re.sub(pattern, r'~~\1~~', text)
+    
     def _format_channel_text_for_copy(self, product_info: Dict, affiliate_link: str) -> str:
         """Gera o texto formatado para copiar (WhatsApp)"""
         title = product_info.get('title', 'Produto')
@@ -1190,16 +1198,17 @@ Link: {affiliate_link}"""
             
             # Usar texto customizado se existir, senão usar padrão
             if 'custom_channel_text' in product_info and product_info['custom_channel_text']:
-                message = product_info['custom_channel_text']
+                # Converter ~texto~ para ~~texto~~ (formato do Telegram)
+                message = self._convert_to_telegram_markdown(product_info['custom_channel_text'])
             else:
                 # Mensagem formatada padrão (sem o link, vai no botão)
                 if original_price > current_price:
-                    # Usar strikethrough para preço original
+                    # Usar strikethrough para preço original (Telegram usa ~~texto~~)
                     message = f"""🔥 *{title}*
 
 💥 {discount}% OFF
 
-~${original_price:.2f}~ → ${current_price:.2f}"""
+~~${original_price:.2f}~~ → ${current_price:.2f}"""
                 else:
                     message = f"""🔥 *{title}*
 
