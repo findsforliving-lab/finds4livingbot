@@ -4,6 +4,7 @@ Bot com funcionalidade de edição
 """
 
 import logging
+import asyncio
 from typing import Optional, Dict, List
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
@@ -31,12 +32,46 @@ class ProductExtractor:
         try:
             import requests
             from bs4 import BeautifulSoup
+            import random
+            import time
             
             # Expandir links curtos (amzn.to, etc)
             final_url = await self._expand_short_url(url)
             
-            headers = Config.get_headers()
-            response = requests.get(final_url, headers=headers, timeout=Config.REQUEST_TIMEOUT, allow_redirects=True)
+            # Headers mais realistas para evitar bloqueio
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+                'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"macOS"',
+                'Referer': 'https://www.google.com/',  # Simular que veio do Google
+            }
+            
+            # Usar Session para manter cookies (mais realista)
+            session = requests.Session()
+            session.headers.update(headers)
+            
+            # Pequeno delay aleatório antes da requisição (simula comportamento humano)
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            
+            # Fazer requisição com timeout adequado
+            response = session.get(
+                final_url, 
+                timeout=Config.REQUEST_TIMEOUT, 
+                allow_redirects=True,
+                verify=True  # Verificar SSL
+            )
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -54,25 +89,51 @@ class ProductExtractor:
             return {'error': str(e)}
     
     async def _expand_short_url(self, url: str) -> str:
-        """Expande URLs curtas (amzn.to, etc)"""
+        """Expande URLs curtas (amzn.to, etc) e limpa parâmetros de afiliado"""
         try:
-            # Se não é link curto, retornar como está
-            if 'amzn.to' not in url.lower():
-                return url
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
             
-            import requests
-            # Fazer requisição HEAD para pegar a URL final sem baixar o conteúdo
-            response = requests.head(url, allow_redirects=True, timeout=10)
-            final_url = response.url
+            # Se é link curto (amzn.to), expandir primeiro
+            if 'amzn.to' in url.lower():
+                import requests
+                # Fazer requisição HEAD para pegar a URL final sem baixar o conteúdo
+                response = requests.head(url, allow_redirects=True, timeout=10)
+                url = response.url
             
-            # Se conseguiu expandir, retornar URL final
-            if final_url and final_url != url:
-                logger.info(f"URL expandida: {url} -> {final_url}")
-                return final_url
+            # IMPORTANTE: Limpar parâmetros de afiliado para evitar detecção de bot
+            # Isso protege a conta de afiliado e evita bloqueios
+            if 'amazon' in url.lower():
+                parsed = urlparse(url)
+                query_params = parse_qs(parsed.query)
+                
+                # Remover TODOS os parâmetros de afiliado e tracking
+                affiliate_params = ['tag', 'ref', 'linkCode', 'creative', 'creativeASIN', 
+                                  'pf_rd_r', 'pf_rd_p', 'pf_rd_m', 'pf_rd_s', 'pf_rd_t', 
+                                  'pf_rd_i', 'dlx_black_dg_dcl', 'th', 'psc']
+                for param in affiliate_params:
+                    query_params.pop(param, None)
+                
+                # Manter apenas parâmetros essenciais do produto (dp ou asin)
+                keep_params = ['dp', 'asin']
+                filtered_params = {k: v for k, v in query_params.items() if k.lower() in keep_params}
+                
+                # Se não tem dp nem asin, tentar extrair do path
+                if not filtered_params:
+                    path_parts = parsed.path.split('/')
+                    if 'dp' in path_parts:
+                        dp_index = path_parts.index('dp')
+                        if dp_index + 1 < len(path_parts):
+                            filtered_params['dp'] = [path_parts[dp_index + 1]]
+                
+                clean_query = urlencode(filtered_params, doseq=True)
+                clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, clean_query, parsed.fragment))
+                
+                logger.info(f"Link limpo para extração: {url[:50]}... -> {clean_url[:50]}...")
+                return clean_url
             
             return url
         except Exception as e:
-            logger.warning(f"Erro ao expandir URL curta: {e}, usando URL original")
+            logger.warning(f"Erro ao processar URL: {e}, usando URL original")
             return url
 
 class ShopifyManager:
@@ -391,6 +452,7 @@ Envie um link para começar! 🚀
         
         categories = product_info.get('categories', ['Electronics'])
         categories_text = " | ".join(categories)
+        cta = product_info.get('cta', '')
         
         affiliate_link = product_info.get('original_url', 'Não informado')
         
@@ -403,6 +465,7 @@ Envie um link para começar! 🚀
 💰 Preços:• Atual: R$ {current_price:.2f}
 {f"• Original: R$ {original_price:.2f}" if original_price > current_price else ""}
 {f"• Desconto: {discount}% OFF" if discount > 0 else ""}
+{f"🏷️ CTA: {cta}" if cta else ""}
 
 📸 Imagens: {images_count} encontradas{images_text}
 
@@ -418,6 +481,7 @@ O que deseja fazer?        """
             [InlineKeyboardButton("💰 Editar Preços", callback_data="edit_prices")],
             [InlineKeyboardButton("📄 Editar Descrição", callback_data="edit_description")],
             [InlineKeyboardButton("📸 Editar Imagens", callback_data="edit_images")],
+            [InlineKeyboardButton("🏷️ Adicionar CTA", callback_data="add_cta")],
             [InlineKeyboardButton("✅ Publicar Assim", callback_data="publish_as_is")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
         ]
@@ -469,12 +533,37 @@ O que deseja fazer?        """
                 await self._remove_category(query, user_id, category)
             elif query.data == "back_to_preview":
                 await self._back_to_preview(query, user_id)
+            elif query.data == "back_to_channel_preview":
+                # Voltar especificamente para o preview simplificado de canal
+                product_info = self.pending_products.get(user_id, {})
+                if product_info:
+                    await self._show_channel_only_preview(query, user_id, product_info)
+                else:
+                    await query.edit_message_text("❌ Produto não encontrado.")
             elif query.data == "edit_prices":
                 await self._start_edit_prices(query, user_id)
             elif query.data == "edit_description":
                 await self._start_edit_description(query, user_id)
             elif query.data == "edit_images":
                 await self._start_edit_images(query, user_id)
+            elif query.data == "add_cta":
+                await self._show_cta_menu(query, user_id)
+            elif query.data == "cta_custom":
+                await self._start_edit_custom_cta(query, user_id)
+            elif query.data == "cta_remove":
+                await self._remove_cta(query, user_id)
+            elif query.data.startswith("cta_"):
+                cta_mapping = {
+                    "cta_amazons_choice": "Amazon's Choice 🟧",
+                    "cta_walmart_deals": "Walmart Deals 🟦",
+                    "cta_lowest_30_days": "Lowest price in 30 days 📉",
+                    "cta_limited_time_deal": "Limited time deal ⏰",
+                    "cta_lightning_deal": "Lightning Deal ⚡",
+                    "cta_deal_selling_fast": "Deal selling fast ⚡",
+                    "cta_best_seller": "#1 Best Seller 🏆"
+                }
+                cta_value = cta_mapping.get(query.data, query.data.replace("cta_", "").replace("_", " "))
+                await self._add_cta(query, user_id, cta_value)
             elif query.data == "publish_as_is":
                 await self._publish_product(query, user_id, context)
             elif query.data == "confirm_post_channel":
@@ -649,6 +738,104 @@ O que deseja fazer?        """
             fake_query.message = success_msg
             fake_query.from_user = update.effective_user
             await self._show_channel_only_preview(fake_query, user_id, self.pending_products[user_id])
+            return
+        elif field == 'cta':
+            # Adicionar CTA customizado
+            cta_value = new_value.strip()
+            self.pending_products[user_id]['cta'] = cta_value
+            del self.editing_products[user_id]
+            success_msg = await update.message.reply_text(f"✅ CTA '{cta_value}' atualizado! Voltando ao preview...")
+            
+            # Verificar se está no fluxo simplificado (channel_only)
+            product_info = self.pending_products[user_id]
+            from types import SimpleNamespace
+            fake_query = SimpleNamespace()
+            fake_query.edit_message_text = success_msg.edit_text
+            fake_query.message = success_msg
+            fake_query.from_user = update.effective_user
+            
+            if product_info.get('channel_only'):
+                # Voltar para o preview simplificado
+                await self._show_channel_only_preview(fake_query, user_id, product_info)
+            else:
+                # Voltar para o preview completo
+                await self._back_to_preview(fake_query, user_id)
+            return
+        elif field == 'affiliate_link':
+            # Salvar link de afiliado e executar ação pendente
+            affiliate_link = new_value.strip()
+            self.pending_products[user_id]['affiliate_link'] = affiliate_link
+            
+            action = edit_info.get('action', '')
+            del self.editing_products[user_id]
+            
+            if action == 'post_channel_direct':
+                # Postar diretamente no canal
+                from types import SimpleNamespace
+                fake_query = SimpleNamespace()
+                fake_query.edit_message_text = update.message.reply_text
+                fake_query.message = update.message
+                fake_query.from_user = update.effective_user
+                
+                product_info = self.pending_products[user_id]
+                fake_shopify_result = {'url': 'N/A', 'title': product_info.get('title', 'Produto')}
+                
+                await update.message.reply_text("🚀 Postando no canal...")
+                await self._post_to_telegram_channel(product_info, fake_shopify_result, affiliate_link, context)
+                
+                # Gerar texto formatado para preview
+                formatted_text = self._format_channel_text_for_copy(product_info, affiliate_link)
+                success_msg = f"""🎉 PRODUTO POSTADO NO CANAL!
+
+📢 Canal: @hotdealsdailyf4l
+
+━━━━━━━━━━━━━━━━━━━━
+
+{formatted_text}"""
+                await update.message.reply_text(success_msg)
+                del self.pending_products[user_id]
+            elif action == 'confirm_post_channel':
+                # Postar após Shopify
+                product_info = self.pending_products[user_id]
+                shopify_result = product_info.get('shopify_result')
+                
+                # Atualizar metafield do Shopify com link de afiliado
+                if shopify_result:
+                    try:
+                        import shopify
+                        product = shopify.Product.find(shopify_result['id'])
+                        if product:
+                            # Buscar e atualizar metafield
+                            all_metafields = shopify.Metafield.find()
+                            for mf in all_metafields:
+                                if (mf.owner_resource == 'product' and 
+                                    str(mf.owner_id) == str(product.id) and
+                                    mf.namespace == 'custom' and 
+                                    mf.key == 'affiliate_link'):
+                                    mf.value = affiliate_link
+                                    mf.save()
+                                    logger.info(f"✅ Metafield atualizado com link de afiliado: {affiliate_link}")
+                                    break
+                    except Exception as e:
+                        logger.error(f"Erro ao atualizar metafield: {e}")
+                
+                await update.message.reply_text("🚀 Postando no canal...")
+                await self._post_to_telegram_channel(product_info, shopify_result, affiliate_link, context)
+                
+                # Gerar texto formatado para preview
+                formatted_text = self._format_channel_text_for_copy(product_info, affiliate_link)
+                categories = product_info.get('categories', ['Electronics'])
+                categories_text = " | ".join(categories)
+                
+                success_msg = f"""🎉 PRODUTO PUBLICADO COM SUCESSO!
+🛍️ Shopify: {shopify_result['url'] if shopify_result else 'N/A'}
+📢 Canal: Postado em @hotdealsdailyf4l
+
+━━━━━━━━━━━━━━━━━━━━
+
+{formatted_text}"""
+                await update.message.reply_text(success_msg)
+                del self.pending_products[user_id]
             return
         elif field == 'channel_price':
             # Editar preço no fluxo simplificado
@@ -840,6 +1027,7 @@ O que deseja fazer?        """
         current_price = price_info.get('current', 0)
         original_price = price_info.get('original', current_price)
         discount = price_info.get('discount_percent', 0)
+        cta = product_info.get('cta', '')
         images = product_info.get('images', [])
         first_image = images[0] if images else 'Nenhuma imagem'
         
@@ -851,6 +1039,7 @@ O que deseja fazer?        """
 💰 Preço Atual: ${current_price:.2f}
 {f"💰 Preço Original: ${original_price:.2f}" if original_price > current_price else ""}
 {f"💥 Desconto: {discount}% OFF" if discount > 0 else ""}
+{f"🏷️ CTA: {cta}" if cta else ""}
 
 🖼️ Primeira Imagem: {first_image[:50]}{"..." if len(first_image) > 50 else ""}
 
@@ -861,6 +1050,7 @@ O que deseja fazer?        """
             [InlineKeyboardButton("✏️ Editar Título", callback_data="channel_edit_title")],
             [InlineKeyboardButton("🖼️ Editar Primeira Imagem", callback_data="channel_edit_image")],
             [InlineKeyboardButton("💰 Editar Preço", callback_data="channel_edit_price")],
+            [InlineKeyboardButton("🏷️ Adicionar CTA", callback_data="add_cta")],
             [InlineKeyboardButton("✅ Postar no Canal", callback_data="channel_post_direct")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
         ]
@@ -929,7 +1119,13 @@ O que deseja fazer?        """
             return
         
         product_info = self.pending_products[user_id]
-        affiliate_link = product_info.get('original_url', '')
+        
+        # Verificar se já tem link de afiliado, senão pedir
+        if not product_info.get('affiliate_link'):
+            await self._start_affiliate_link_input(query, user_id, action='post_channel_direct')
+            return
+        
+        affiliate_link = product_info.get('affiliate_link')
         
         # Criar um shopify_result fake para usar a função existente
         fake_shopify_result = {'url': 'N/A', 'title': product_info.get('title', 'Produto')}
@@ -1007,6 +1203,7 @@ O que deseja fazer?        """
             self.pending_products[user_id]['affiliate_link'] = affiliate_link
             
             # Gerar texto do canal para preview
+            cta = product_info.get('cta', '')
             if 'custom_channel_text' in product_info and product_info['custom_channel_text']:
                 channel_text = product_info['custom_channel_text']
             else:
@@ -1019,6 +1216,10 @@ ${original_price:.2f} → ${current_price:.2f}"""
                     channel_text = f"""🔥 *{title}*
 
 💰 ${current_price:.2f}"""
+            
+            # Adicionar CTA se existir
+            if cta:
+                channel_text += f"\n\n{cta}"
             
             # Mensagem de preview com botões de confirmação
             preview_message = f"""📺 PREVIEW DO CANAL:
@@ -1162,6 +1363,7 @@ ${original_price:.2f} → ${current_price:.2f}"""
         current_price = price_info.get('current', 0)
         original_price = price_info.get('original', current_price)
         discount = price_info.get('discount_percent', 0)
+        cta = product_info.get('cta', '')
         
         # Limpar título (remover espaços extras)
         title = ' '.join(title.split()) if title else 'Produto'
@@ -1178,19 +1380,22 @@ ${original_price:.2f} → ${current_price:.2f}"""
         else:
             # Formato padrão com espaçamentos corretos (1 linha em branco entre seções)
             if original_price > current_price:
-                return f"""🔥 *{title}*
+                text = f"""🔥 *{title}*
 
 💥 {discount}% OFF
 
-~${original_price:.2f}~ → ${current_price:.2f}
-
-Link: {affiliate_link}"""
+~${original_price:.2f}~ → ${current_price:.2f}"""
             else:
-                return f"""🔥 *{title}*
+                text = f"""🔥 *{title}*
 
-💰 ${current_price:.2f}
-
-Link: {affiliate_link}"""
+💰 ${current_price:.2f}"""
+            
+            # Adicionar CTA se existir (com asteriscos apenas no CTA)
+            if cta:
+                text += f"\n\n*{cta}*"
+            
+            text += f"\n\nLink: {affiliate_link}"
+            return text
 
     async def _post_to_telegram_channel(self, product_info: Dict, shopify_result: Dict, affiliate_link: str, context):
         """Posta produto no canal do Telegram"""
@@ -1209,6 +1414,7 @@ Link: {affiliate_link}"""
             discount = price_info.get('discount_percent', 0)
             
             # Usar texto customizado se existir, senão usar padrão
+            cta = product_info.get('cta', '')
             if 'custom_channel_text' in product_info and product_info['custom_channel_text']:
                 # Converter para HTML (formato mais confiável do Telegram)
                 message = self._convert_to_telegram_html(product_info['custom_channel_text'])
@@ -1225,6 +1431,10 @@ Link: {affiliate_link}"""
                     message = f"""🔥 <b>{title}</b>
 
 💰 ${current_price:.2f}"""
+            
+            # Adicionar CTA se existir
+            if cta:
+                message += f"\n\n{cta}"
             
             logger.info(f"Mensagem preparada: {message[:100]}...")
             
@@ -1270,11 +1480,17 @@ Link: {affiliate_link}"""
             
             product_info = self.pending_products[user_id]
             shopify_result = product_info.get('shopify_result')
-            affiliate_link = product_info.get('affiliate_link')
             
-            if not shopify_result or not affiliate_link:
-                await query.edit_message_text("❌ Dados do produto não encontrados.")
+            if not shopify_result:
+                await query.edit_message_text("❌ Dados do Shopify não encontrados.")
                 return
+            
+            # Verificar se já tem link de afiliado, senão pedir
+            if not product_info.get('affiliate_link'):
+                await self._start_affiliate_link_input(query, user_id, action='confirm_post_channel', shopify_result=shopify_result)
+                return
+            
+            affiliate_link = product_info.get('affiliate_link')
             
             await query.edit_message_text("🚀 Postando no canal...")
             
@@ -1596,6 +1812,31 @@ O que deseja fazer?        """
         
         await query.edit_message_text(preview_text, reply_markup=reply_markup)
     
+    async def _start_affiliate_link_input(self, query, user_id: int, action: str, shopify_result: Dict = None):
+        """Pede o link de afiliado antes de postar no canal"""
+        product_info = self.pending_products.get(user_id, {})
+        original_url = product_info.get('original_url', 'Link não disponível')
+        
+        # Salvar shopify_result se fornecido
+        if shopify_result:
+            self.pending_products[user_id]['shopify_result'] = shopify_result
+        
+        await query.edit_message_text(
+            "🔗 LINK DE AFILIADO\n\n"
+            "Por favor, envie o link de afiliado para este produto:\n\n"
+            f"Produto: {product_info.get('title', 'Produto')[:50]}\n"
+            f"Link normal: {original_url[:80]}...\n\n"
+            "📝 Envie o link de afiliado (ex: amzn.to/xxxxx ou link com tag de afiliado)\n\n"
+            "⚠️ Este link será usado apenas no botão do Telegram, não na extração."
+        )
+        
+        # Configurar estado para aguardar link de afiliado
+        self.editing_products[user_id] = {
+            'field': 'affiliate_link', 
+            'action': action,
+            'message_id': query.message.message_id
+        }
+    
     def _get_ordinal(self, num: int) -> str:
         """Converte número em ordinal (1->PRIMEIRA, 2->SEGUNDA, etc.)"""
         ordinals = {
@@ -1672,6 +1913,97 @@ O que deseja fazer?
         
         # Sem parse_mode para evitar problemas com caracteres especiais
         await msg_to_edit.edit_text(preview_text, reply_markup=reply_markup)
+    
+    async def _show_cta_menu(self, query, user_id: int):
+        """Mostra menu de opções de CTA"""
+        product_info = self.pending_products.get(user_id, {})
+        current_cta = product_info.get('cta', '')
+        
+        keyboard = [
+            [InlineKeyboardButton("Amazon's Choice 🟧", callback_data="cta_amazons_choice")],
+            [InlineKeyboardButton("Walmart Deals 🟦", callback_data="cta_walmart_deals")],
+            [InlineKeyboardButton("Lowest price in 30 days 📉", callback_data="cta_lowest_30_days")],
+            [InlineKeyboardButton("Limited time deal ⏰", callback_data="cta_limited_time_deal")],
+            [InlineKeyboardButton("Lightning Deal ⚡", callback_data="cta_lightning_deal")],
+            [InlineKeyboardButton("Deal selling fast ⚡", callback_data="cta_deal_selling_fast")],
+            [InlineKeyboardButton("#1 Best Seller 🏆", callback_data="cta_best_seller")],
+            [InlineKeyboardButton("✏️ CTA Customizado", callback_data="cta_custom")],
+        ]
+        
+        if current_cta:
+            keyboard.append([InlineKeyboardButton("❌ Remover CTA", callback_data="cta_remove")])
+        
+        # Botão de voltar deve respeitar o fluxo atual
+        if product_info.get('channel_only'):
+            keyboard.append([InlineKeyboardButton("🔙 Voltar", callback_data="back_to_channel_preview")])
+        else:
+            keyboard.append([InlineKeyboardButton("🔙 Voltar", callback_data="back_to_preview")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🏷️ ADICIONAR CTA\n\n"
+            f"CTA atual: {current_cta if current_cta else 'Nenhum'}\n\n"
+            f"Escolha uma opção:",
+            reply_markup=reply_markup
+        )
+    
+    async def _add_cta(self, query, user_id: int, cta_value: str):
+        """Adiciona CTA ao produto"""
+        if user_id not in self.pending_products:
+            await query.edit_message_text("❌ Produto não encontrado.")
+            return
+        
+        self.pending_products[user_id]['cta'] = cta_value
+        
+        # Verificar se está no fluxo simplificado
+        product_info = self.pending_products[user_id]
+        if product_info.get('channel_only'):
+            await self._show_channel_only_preview(query, user_id, product_info)
+        else:
+            await self._back_to_preview(query, user_id)
+    
+    async def _remove_cta(self, query, user_id: int):
+        """Remove CTA do produto"""
+        if user_id not in self.pending_products:
+            await query.edit_message_text("❌ Produto não encontrado.")
+            return
+        
+        product_info = self.pending_products[user_id]
+        if 'cta' in product_info:
+            del product_info['cta']
+        
+        # Verificar se está no fluxo simplificado
+        if product_info.get('channel_only'):
+            await self._show_channel_only_preview(query, user_id, product_info)
+        else:
+            await self._back_to_preview(query, user_id)
+    
+    async def _start_edit_custom_cta(self, query, user_id: int):
+        """Inicia edição de CTA customizado"""
+        if user_id not in self.pending_products:
+            await query.edit_message_text("❌ Produto não encontrado.")
+            return
+        
+        product_info = self.pending_products[user_id]
+        current_cta = product_info.get('cta', '')
+        
+        await query.edit_message_text(
+            f"✏️ CTA CUSTOMIZADO\n\n"
+            f"CTA atual: {current_cta if current_cta else 'Nenhum'}\n\n"
+            f"📝 **Digite o texto do CTA que deseja adicionar**\n\n"
+            f"Você pode incluir emojis se quiser.\n\n"
+            f"Exemplos:\n"
+            f"• Amazon's Choice 🟧\n"
+            f"• Walmart Deals 🟦\n"
+            f"• Lowest price in 30 days 📉\n"
+            f"• Limited time deal ⏰\n"
+            f"• Lightning Deal ⚡\n"
+            f"• Deal selling fast ⚡\n"
+            f"• #1 Best Seller 🏆\n"
+            f"• Ou qualquer texto personalizado"
+        )
+        self.editing_products[user_id] = {'field': 'cta', 'message_id': query.message.message_id}
     
     def _is_valid_url(self, url: str) -> bool:
         """Verifica se a URL é válida"""

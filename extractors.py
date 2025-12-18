@@ -20,6 +20,7 @@ class SiteSpecificExtractor:
             'shopee.com.br': self._extract_shopee,
             'magazineluiza.com.br': self._extract_magalu,
             'americanas.com.br': self._extract_americanas,
+            'walmart.com': self._extract_walmart,
         }
     
     def extract(self, url: str, soup: BeautifulSoup) -> Dict:
@@ -335,6 +336,120 @@ class SiteSpecificExtractor:
         # Descrição
         desc_selectors = [
             '[data-testid="product-description"]',
+            '.description-product',
+            '.product-resume'
+        ]
+        data['description'] = self._get_text_by_selectors(soup, desc_selectors)
+        
+        return data
+    
+    def _extract_walmart(self, soup: BeautifulSoup, url: str) -> Dict:
+        """Extrator específico para Walmart"""
+        data = {}
+        
+        # Título
+        title_selectors = [
+            'h1[itemprop="name"]',
+            'h1.prod-ProductTitle',
+            '[data-testid="heading-product-title"]',
+            '.header-product__title',
+            'h1'
+        ]
+        data['title'] = self._get_text_by_selectors(soup, title_selectors)
+        
+        # Preços - Walmart usa diferentes estruturas
+        price_current = None
+        
+        # 1. Tentar preço "Now $X.XX" (formato mais comum)
+        price_elem = soup.select_one('[itemprop="price"], .price-current, .prod-PriceHero .price-current')
+        if price_elem:
+            price_text = price_elem.get_text(strip=True)
+            # Limpar texto como "Now $25.00" para pegar só o número
+            price_clean = re.sub(r'[^\d.]', '', price_text)
+            if price_clean:
+                price_current = price_clean
+        
+        # 2. Tentar seletores específicos do Walmart
+        if not price_current:
+            price_elem = soup.select_one(
+                '[data-testid="price-current"], '
+                '.prod-PriceHero [data-testid="price-current"], '
+                '.price-current, '
+                '[itemprop="price"]'
+            )
+            if price_elem:
+                price_text = price_elem.get_text(strip=True)
+                # Extrair número do preço
+                price_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
+                if price_match:
+                    price_current = price_match.group(0)
+        
+        # 3. Tentar buscar em scripts JSON-LD
+        if not price_current:
+            scripts = soup.find_all('script', type='application/ld+json')
+            for script in scripts:
+                try:
+                    json_data = json.loads(script.string)
+                    if isinstance(json_data, dict):
+                        if 'offers' in json_data:
+                            offers = json_data['offers']
+                            if isinstance(offers, dict) and 'price' in offers:
+                                price_current = str(offers['price'])
+                                break
+                            elif isinstance(offers, list) and len(offers) > 0:
+                                if 'price' in offers[0]:
+                                    price_current = str(offers[0]['price'])
+                                    break
+                except:
+                    continue
+        
+        # Preço original (was/list price)
+        price_original = None
+        price_original_elem = soup.select_one(
+            '[data-testid="price-original"], '
+            '.price-was, '
+            '.prod-PriceHero .price-was, '
+            '.strike-through'
+        )
+        if price_original_elem:
+            price_text = price_original_elem.get_text(strip=True)
+            price_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
+            if price_match:
+                price_original = price_match.group(0)
+        
+        data['price'] = self._parse_prices(price_current, price_original)
+        
+        # Imagens
+        images = []
+        # Tentar múltiplos seletores de imagem
+        img_selectors = [
+            '[data-testid="product-image"] img',
+            '.prod-hero-image img',
+            '.product-gallery img',
+            '.carousel-image img',
+            '[itemprop="image"]',
+            'img[alt*="product"]'
+        ]
+        for selector in img_selectors:
+            img_elements = soup.select(selector)
+            for img in img_elements:
+                src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+                if src:
+                    # Converter URLs relativas para absolutas
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif src.startswith('/'):
+                        src = 'https://www.walmart.com' + src
+                    if src not in images and 'walmart' in src.lower():
+                        images.append(src)
+        
+        data['images'] = images[:4]
+        
+        # Descrição
+        desc_selectors = [
+            '[data-testid="product-description"]',
+            '[itemprop="description"]',
+            '.prod-ProductDescription',
             '.description-product',
             '.product-resume'
         ]

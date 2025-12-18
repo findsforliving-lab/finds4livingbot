@@ -170,7 +170,7 @@ Produto: {title}
     def telegram_channel_post(title: str, current_price: float, original_price: float, 
                             discount: int, affiliate_link: str) -> str:
         """Gera mensagem para o canal do Telegram"""
-        message = f"🔥 *{title}*\n\n"
+        message = f"*{title}*\n\n"
         
         if discount > 0:
             message += f"💥 {discount}% OFF\n"
