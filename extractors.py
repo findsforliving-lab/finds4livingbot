@@ -72,46 +72,7 @@ class SiteSpecificExtractor:
                 except:
                     continue
         
-        # Preços - mais seletores e métodos
-        price_current = self._get_text_by_selectors(soup, [
-            '.a-price .a-offscreen',
-            '.a-price-current .a-offscreen',
-            '#priceblock_dealprice',
-            '#priceblock_ourprice',
-            '#priceblock_saleprice',
-            '.a-price-whole',
-            'span.a-price[data-a-color="price"] .a-offscreen',
-            'span[data-a-color="price"] .a-offscreen'
-        ])
-        
-        # Se não encontrou preço atual, tentar JSON-LD
-        if not price_current:
-            scripts = soup.find_all('script', type='application/ld+json')
-            for script in scripts:
-                try:
-                    json_data = json.loads(script.string)
-                    if isinstance(json_data, dict):
-                        if 'offers' in json_data:
-                            offers = json_data['offers']
-                            if isinstance(offers, dict) and 'price' in offers:
-                                price_current = str(offers['price'])
-                                break
-                            elif isinstance(offers, list) and len(offers) > 0:
-                                if 'price' in offers[0]:
-                                    price_current = str(offers[0]['price'])
-                                    break
-                except:
-                    continue
-        
-        price_original = self._get_text_by_selectors(soup, [
-            '.a-price-was .a-offscreen',
-            '#priceblock_listprice',
-            '.a-text-strike .a-offscreen',
-            '.basisPrice .a-offscreen',
-            'span.a-price.a-text-price .a-offscreen'
-        ])
-        
-        data['price'] = self._parse_prices(price_current, price_original)
+        data['price'] = self._extract_amazon_prices(soup)
         
         # Imagens
         data['images'] = self._extract_amazon_images(soup)
@@ -126,6 +87,39 @@ class SiteSpecificExtractor:
         data['description'] = self._get_text_by_selectors(soup, desc_selectors)
         
         return data
+
+    def _extract_amazon_prices(self, soup: BeautifulSoup) -> Dict:
+        """Extrai preços da Amazon evitando preço por unidade e variações"""
+        prices = []
+
+        for block_selector in ['#corePriceDisplay_desktop_feature_div', '#corePrice_feature_div', '#apex_desktop']:
+            prices = self._extract_prices_from_block(soup, block_selector)
+            if prices:
+                break
+
+        # Fallback: alguns templates antigos ainda expõem o preço em elementos específicos
+        if not prices:
+            texts = [
+                self._get_price_by_selectors(soup, ['span.priceToPay span.a-offscreen']),
+                self._get_price_by_selectors(soup, ['#priceblock_dealprice', '#priceblock_saleprice', '#priceblock_ourprice']),
+            ]
+            for txt in texts:
+                val = self._extract_price_value(txt) if txt else None
+                if val is not None:
+                    prices.append(val)
+
+        if not prices:
+            return {'current': 0, 'original': 0, 'discount_percent': 0}
+
+        # Remover "preço por unidade" (ex.: $4.75/count) que normalmente é muito menor
+        max_price = max(prices)
+        filtered = [p for p in prices if p >= max_price * 0.30]
+        candidates = filtered or prices
+
+        current_price = min(candidates)
+        original_price = max(candidates)
+
+        return self._parse_prices(str(current_price), str(original_price))
     
     def _extract_amazon_images(self, soup: BeautifulSoup) -> List[str]:
         """Extrai imagens específicas da Amazon"""
@@ -575,7 +569,58 @@ class SiteSpecificExtractor:
                     if text.strip():
                         return text.strip()
         return ""
-    
+
+    def _get_price_by_selectors(self, soup: BeautifulSoup, selectors: List[str]) -> str:
+        """Retorna o primeiro texto de preço encontrado na ordem dos seletores"""
+        for selector in selectors:
+            elements = soup.select(selector)
+            for element in elements:
+                text = element.get_text()
+                if text:
+                    text = ' '.join(text.split())
+                    if text.strip():
+                        return text.strip()
+        return ""
+
+    def _extract_prices_from_block(self, soup: BeautifulSoup, block_selector: str) -> List[float]:
+        """Extrai todos os preços (floats) de um bloco específico"""
+        prices = []
+        block = soup.select_one(block_selector)
+        if not block:
+            return prices
+        # Pegar textos de spans com preço
+        for el in block.select('span.a-offscreen'):
+            # Evitar "preço por unidade" (ex.: $4.75/count)
+            if el.find_parent(id=re.compile(r'pricePerUnit', re.I)) or el.find_parent(class_=re.compile(r'a-price-per-unit', re.I)):
+                continue
+            parent_text = ""
+            try:
+                parent_text = (el.parent.get_text(" ") or "").lower()
+            except Exception:
+                parent_text = ""
+            if '/' in parent_text and any(token in parent_text for token in ['count', 'oz', 'fl oz', 'ounce', 'lb', 'pound', 'pack', 'unit']):
+                continue
+            val = self._extract_price_value(el.get_text())
+            if val is not None:
+                prices.append(val)
+        # Como fallback, pegar números com 2 decimais no texto do bloco
+        text = block.get_text(" ")
+        for match in re.findall(r'\d{1,3}(?:[.,]\d{3})*[.,]\d{2}', text):
+            val = self._extract_price_value(match)
+            if val is not None:
+                prices.append(val)
+        return prices
+
+    def _assemble_price_from_parts(self, soup: BeautifulSoup, whole_selectors: List[str], fraction_selectors: List[str]) -> str:
+        """Monta preço unindo parte inteira e fracionária quando exibidas separadas (ex.: Amazon)"""
+        whole = self._get_text_by_selectors(soup, whole_selectors)
+        fraction = self._get_text_by_selectors(soup, fraction_selectors)
+        if whole:
+            fraction = fraction or "00"
+            fraction = fraction.zfill(2)[:2]
+            return f"{whole}.{fraction}"
+        return ""
+
     def _parse_prices(self, current_str: str, original_str: str) -> Dict:
         """Processa strings de preço"""
         current_price = self._extract_price_value(current_str) if current_str else 0
@@ -599,37 +644,54 @@ class SiteSpecificExtractor:
         """Extrai valor numérico do preço"""
         if not price_text:
             return None
-        
-        # Remover caracteres não numéricos exceto vírgula e ponto
-        price_clean = re.sub(r'[^\d,.]', '', price_text.strip())
-        
+        text = price_text.replace('\xa0', ' ').strip()
+
+        # 1) Prioridade: primeiro número com 2 casas decimais
+        decimal_match = re.search(r'(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})', text)
+        if decimal_match:
+            candidate = decimal_match.group(1)
+            last_dot = candidate.rfind('.')
+            last_comma = candidate.rfind(',')
+            if last_comma > last_dot:
+                candidate = candidate.replace('.', '').replace(',', '.')
+            else:
+                candidate = candidate.replace(',', '')
+            try:
+                return float(candidate)
+            except ValueError:
+                pass
+
+        # 2) Parte inteira e fração separadas por espaço (ex.: "16 99")
+        space_match = re.search(r'(\d+)\s+(\d{2})', text)
+        if space_match:
+            try:
+                return float(f"{space_match.group(1)}.{space_match.group(2)}")
+            except ValueError:
+                pass
+
+        # 3) Fallback antigo
+        price_clean = re.sub(r'[^\d,.]', '', text)
         if not price_clean:
             return None
         
         try:
             # Tratar formato brasileiro (123,45) ou americano (123.45)
             if ',' in price_clean and '.' in price_clean:
-                # Formato: 1.234,56 (brasileiro) ou 1,234.56 (americano)
-                # Verificar qual é o separador de milhares
                 if price_clean.rindex('.') > price_clean.rindex(','):
-                    # Último ponto está depois da vírgula = formato americano (1,234.56)
                     price_clean = price_clean.replace(',', '')
                 else:
-                    # Última vírgula está depois do ponto = formato brasileiro (1.234,56)
                     price_clean = price_clean.replace('.', '').replace(',', '.')
             elif ',' in price_clean:
-                # Verificar se é separador decimal ou de milhares
                 parts = price_clean.split(',')
-                if len(parts[-1]) == 2:  # Provavelmente decimal (123,45)
+                if len(parts[-1]) == 2:
                     price_clean = price_clean.replace(',', '.')
-                elif len(parts[-1]) == 3:  # Provavelmente milhares (1,234)
+                elif len(parts[-1]) == 3:
                     price_clean = price_clean.replace(',', '')
             elif '.' in price_clean:
-                # Verificar se é decimal ou milhares
                 parts = price_clean.split('.')
-                if len(parts) > 2:  # Múltiplos pontos = milhares (1.234.567)
+                if len(parts) > 2:
                     price_clean = price_clean.replace('.', '')
-                elif len(parts) == 2 and len(parts[-1]) > 2:  # Mais de 2 dígitos após ponto = milhares
+                elif len(parts) == 2 and len(parts[-1]) > 2:
                     price_clean = price_clean.replace('.', '')
             
             return float(price_clean)
