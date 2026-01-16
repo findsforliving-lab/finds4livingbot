@@ -1,13 +1,23 @@
 # 🔧 Instruções para Corrigir Preços no Replit
 
-## Opção 1: Aplicar Patch Automaticamente (RECOMENDADO)
+## ⚠️ ATUALIZAÇÃO: Use o Patch V2 (filtra preços incorretos)
+
+## Opção 1: Aplicar Patch V2 Automaticamente (RECOMENDADO)
 
 No terminal do Replit, execute ANTES de iniciar o bot:
 
 ```bash
-python3 patch_replit_prices.py
+python3 patch_replit_prices_v2.py
 python3 bot_with_edit.py
 ```
+
+## Testar se está funcionando:
+
+```bash
+python3 test_price_extraction.py https://www.amazon.com/dp/B08N5WRWNW
+```
+
+Isso vai mostrar se o preço está sendo extraído corretamente.
 
 ## Opção 2: Adicionar Patch Direto no Código (Apenas no Replit)
 
